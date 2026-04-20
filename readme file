@@ -1,0 +1,202 @@
+# PES-VCS Lab Report
+### Building a Version Control System from Scratch
+
+**Author:** Your Name `<PES1UG24CS050>`  
+secA sem4
+**Platform:** Ubuntu 22.04  
+
+---
+
+## Table of Contents
+1. [Phase 1 – Object Storage Foundation](#phase-1--object-storage-foundation)
+2. [Phase 2 – Tree Objects](#phase-2--tree-objects)
+3. [Phase 3 – The Index (Staging Area)](#phase-3--the-index-staging-area)
+4. [Phase 4 – Commits and History](#phase-4--commits-and-history)
+5. [Phase 5 – Branching and Checkout (Analysis)](#phase-5--branching-and-checkout-analysis)
+6. [Phase 6 – Garbage Collection (Analysis)](#phase-6--garbage-collection-analysis)
+
+---
+
+## Phase 1 – Object Storage Foundation
+
+**Filesystem Concepts:** Content-addressable storage, directory sharding, atomic writes, hashing for integrity  
+**Files implemented:** `object.c` — `object_write`, `object_read`
+
+### Implementation Summary
+
+`object_write` prepends a type header (`blob <size>\0`, `tree <size>\0`, or `commit <size>\0`) to the data, computes a SHA-256 hash of the full content, and writes the object atomically using a temp-file-then-rename pattern. Objects are sharded into subdirectories by the first two hex characters of the hash.
+
+`object_read` reads the file at the hashed path, parses the header to extract type and size, recomputes the SHA-256 to verify integrity against the filename, and returns the data portion after the null byte.
+
+---
+
+---
+
+## Phase 2 – Tree Objects
+
+**Filesystem Concepts:** Directory representation, recursive structures, file modes and permissions  
+**Files implemented:** `tree.c` — `tree_from_index`
+
+### Implementation Summary
+
+`tree_from_index` walks the index entries and groups them by directory. For nested paths like `src/main.c`, it recursively builds subtrees before writing the parent. Each tree entry stores a mode (`100644`, `100755`, or `040000`), the object hash, and the entry name. All tree objects are written to the object store, and the root tree hash is returned.
+
+---
+
+---
+
+## Phase 3 – The Index (Staging Area)
+
+**Filesystem Concepts:** File format design, atomic writes, change detection using metadata  
+**Files implemented:** `index.c` — `index_load`, `index_save`, `index_add`
+
+### Implementation Summary
+
+`index_load` reads `.pes/index` line by line, parsing each entry in the format `<mode> <hash-hex> <mtime> <size> <path>`. If the file doesn't exist, it initializes an empty index without error.
+
+`index_save` sorts all entries by path, writes them to a temp file, calls `fsync()`, then atomically renames the temp file to `.pes/index`.
+
+`index_add` reads the target file, computes its blob and writes it to the object store via `object_write`, then creates or updates the index entry with the current `mtime`, `size`, and hash.
+
+---
+
+
+---
+
+
+## Phase 4 – Commits and History
+
+**Filesystem Concepts:** Linked structures on disk, reference files, atomic pointer updates  
+**Files implemented:** `commit.c` — `commit_create`
+
+### Implementation Summary
+
+`commit_create` calls `tree_from_index()` to snapshot the current staged state into a tree object. It then reads the current HEAD to find the parent commit hash (empty for the first commit). The author string is fetched from `pes_author()`. A commit object is serialized with `tree`, `parent`, `author`, `committer`, timestamp, and message fields, written to the object store, and the branch ref is updated atomically via `head_update`.
+
+
+---
+
++----------------------+------------------------------+---------------------------------------------+----------------------------------------------+
+|  Screenshot        | Command / Step            | Expected Output                           | What It Demonstrates                       |
++----------------------+------------------------------+---------------------------------------------+----------------------------------------------+
+| 1A – Object Test     | ./test_objects               | “All tests passed”                           | Object write/read + hashing works correctly  |
++----------------------+------------------------------+---------------------------------------------+----------------------------------------------+
+| 1B – Object Store    | find .pes/objects -type f    | .pes/objects/ab/xxxx... files                | Hash-based storage & directory sharding      |
++----------------------+------------------------------+---------------------------------------------+----------------------------------------------+
+| 2A – Tree Test       | ./test_tree                  | “Tree test passed”                           | Tree creation from index works               |
++----------------------+------------------------------+---------------------------------------------+----------------------------------------------+
+| 2B – Tree Raw View   | xxd <tree_file> \| head -20  | Hex + readable file names                    | Internal tree object structure               |
++----------------------+------------------------------+---------------------------------------------+----------------------------------------------+
+| 3A – Workflow        | pes init → add → status      | Init + add + staged changes messages         | Index (staging area) functioning             |
++----------------------+------------------------------+---------------------------------------------+----------------------------------------------+
+| 3B – Index File      | cat .pes/index               | mode hash mtime size filename                | Metadata stored correctly in index           |
++----------------------+------------------------------+---------------------------------------------+----------------------------------------------+
+| 4A – Commit Log      | pes log                      | Multiple commits with messages               | Commit history and linking                   |
++----------------------+------------------------------+---------------------------------------------+----------------------------------------------+
+| 4B – Repo Files      | find .pes -type f \| sort    | objects, refs, HEAD, index files             | Repository growth and structure              |
++----------------------+------------------------------+---------------------------------------------+----------------------------------------------+
+| 4C – HEAD & Branch   | cat HEAD + main              | HEAD → ref, branch → commit hash             | Branch pointer & HEAD tracking               |
++----------------------+------------------------------+---------------------------------------------+----------------------------------------------+
+| Integration Test     | make test-integration        | All tests passed                             | Full system integration works                |
++----------------------+------------------------------+---------------------------------------------+----------------------------------------------+
+
+
+## Phase 5 – Branching and Checkout (Analysis)
+
+### Q5.1 — Implementing `pes checkout <branch>`
+
+To implement `pes checkout <branch>`, three things must happen:
+
+**Files that change in `.pes/`:**
+- `.pes/HEAD` is updated to contain `ref: refs/heads/<branch>`, pointing to the new branch.
+- If the branch doesn't exist yet, a new file `.pes/refs/heads/<branch>` is created containing the current commit hash (creating a new branch at the current position).
+- If switching to an existing branch, `.pes/HEAD` simply redirects to that branch's ref file. The index should also be updated to reflect the tree of the target commit.
+
+**What must happen to the working directory:**
+The working directory must be brought in sync with the target branch's latest commit. This involves:
+1. Reading the target commit's tree object.
+2. Diffing it against the current HEAD's tree to identify files that changed, were added, or were deleted.
+3. Writing new/changed file contents from the object store into the working directory.
+4. Deleting files that exist in the current tree but not in the target tree.
+
+**What makes this complex:**
+- **Dirty working directory:** If the user has local modifications to a file that also differs between branches, blindly overwriting it would destroy their work. Checkout must detect and refuse this.
+- **Untracked files:** If a file doesn't exist in the current branch but would be written by the target branch, and the user already has a file with that name untracked, checkout must warn or refuse.
+- **Partial failure:** The operation isn't atomic at the OS level across many files. If it fails midway, the repo can end up in an inconsistent state. Git handles this by pre-validating all conflicts before touching the working directory.
+- **Nested directories:** Creating or deleting subdirectory trees requires careful traversal and cleanup of empty directories.
+
+---
+
+### Q5.2 — Detecting a Dirty Working Directory Conflict
+
+To detect whether a file would cause a conflict during branch switch using only the index and the object store:
+
+1. **Get the current file's state from the index:** The index stores the blob hash, `mtime`, and `size` of each tracked file at the time it was last staged. Read the index entry for the file.
+2. **Check for unstaged local modifications:** Compare the working directory file's current `mtime` and `size` against the index entry. If they differ, re-hash the file and compare the blob hash. If the hashes differ, the file has been locally modified but not staged — it is "dirty."
+3. **Check if the file differs between branches:** Read the blob hash for this file from the current HEAD's tree and from the target branch's tree (by traversing the respective tree objects). If the two hashes differ, the file changes between branches.
+4. **Conflict condition:** If both (2) and (3) are true — the file is locally modified AND it differs between branches — checkout must refuse for that file and report a conflict. If only (3) is true (file differs between branches but is clean in the working directory), it is safe to overwrite.
+
+This approach requires no extra metadata — everything needed (working file stats, staged hashes, committed tree hashes) is already present in the index and object store.
+
+---
+
+### Q5.3 — Detached HEAD and Recovery
+
+**What happens when you commit in detached HEAD state:**
+
+In detached HEAD, `.pes/HEAD` contains a raw commit hash instead of `ref: refs/heads/<branch>`. When `commit_create` runs, it reads HEAD, creates a new commit pointing to the detached commit as its parent, and writes the new commit hash directly back into HEAD. The new commit exists in the object store and HEAD advances — but no branch ref file is updated. The new commits are "floating": reachable from HEAD right now, but not from any named branch.
+
+The danger: as soon as you switch branches (which overwrites HEAD with a branch ref), the detached commits become unreachable. No branch points to them, so GC will eventually delete them.
+
+**How a user can recover:**
+- **Immediately after noticing:** Create a new branch file at `.pes/refs/heads/recovery` containing the detached HEAD's commit hash. This makes the commit permanently reachable.
+- **After switching away:** The commit hash is still in the object store until GC runs. The user can search `.pes/objects` for commit objects whose parent chain includes recognizable earlier commits, then create a branch pointing to the recovered hash.
+- **If GC has already run:** The commits are gone. This is why Git warns "You are in detached HEAD state" and suggests creating a branch before committing.
+
+---
+
+## Phase 6 – Garbage Collection (Analysis)
+
+### Q6.1 — Finding and Deleting Unreachable Objects
+
+**Algorithm (Mark and Sweep):**
+
+**Mark phase — find all reachable objects:**
+1. Start with all branch tips: read every file in `.pes/refs/heads/` to get a set of commit hashes. Also include HEAD if it points to a commit directly.
+2. Use a **hash set** to track visited hashes.
+3. For each starting commit hash, do a BFS/DFS walk: add the commit hash, parse its `tree` and `parent` fields, recursively walk the tree (adding all blob and subtree hashes), and follow the parent chain until the initial commit.
+4. Continue until all branches are exhausted.
+
+**Sweep phase — delete unreachable objects:**
+1. Walk every file in `.pes/objects/XX/YYYY...` using `opendir/readdir`.
+2. Reconstruct the full hash from the directory name + filename.
+3. If the hash is NOT in the reachable set, delete the file.
+4. Remove any now-empty two-character subdirectories.
+
+**Data structure:** A hash set (e.g., `unordered_set<string>` in C++, or a sorted array with binary search in C) gives O(1) average insert and lookup, and the total number of unique hashes fits comfortably in memory.
+
+**Estimate for 100,000 commits and 50 branches:**
+Assuming ~10 objects per commit on average (1 commit + 1 root tree + a few subtrees + a few blobs, with sharing reducing redundant reads via the visited-set short-circuit):
+- Total objects to visit during mark: ~1,000,000 in the worst case, far fewer in practice due to sharing.
+- Total objects in the store: likely 200,000–500,000 unique objects.
+- Sweep: one full directory scan of ~200,000–500,000 file stat checks.
+
+---
+
+### Q6.2 — Race Condition Between GC and Commit
+
+**The race condition:**
+
+1. **Commit** begins. It calls `object_write` to store a new blob (hash `abc123`). The file is written to `.pes/objects/ab/c123...`.
+2. **GC** starts its mark phase. It traverses all reachable objects. At this moment, no branch or commit points to `abc123` yet — the commit hasn't finished. GC marks `abc123` as **unreachable**.
+3. **GC sweep** deletes `abc123` from the object store.
+4. **Commit** continues. It builds a tree referencing blob `abc123`, writes the tree, writes the commit, and updates the branch ref. The commit now references `abc123` — but the file is gone. The repository is now **corrupt**.
+
+**How Git avoids this:**
+- **Grace period:** Git's GC does not delete objects newer than 2 weeks by default (`gc.pruneExpire`). A freshly written blob will not be pruned, giving in-flight operations time to complete.
+- **Lock file detection:** During `git gc --prune=now`, Git checks for lock files (e.g., `index.lock`) that indicate an active operation and refuses to run GC concurrently.
+- **Ref-based protection:** Git also protects objects referenced by `ORIG_HEAD`, `MERGE_HEAD`, the reflog, and stash — all of which can hold temporary references to objects not yet on a named branch.
+
+---
+
+*End of Report*
