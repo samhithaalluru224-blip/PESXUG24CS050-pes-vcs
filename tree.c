@@ -129,9 +129,71 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 //   - object_write    : save that binary buffer to the store as OBJ_TREE
 //
 // Returns 0 on success, -1 on error.
+
 int tree_from_index(ObjectID *id_out) {
-    // TODO: Implement recursive tree building
-    // (See Lab Appendix for logical steps)
-    (void)id_out;
-    return -1;
+
+    Tree tree;
+    tree.count = 0;
+
+    DIR *dir = opendir(".");
+    if (!dir) return -1;
+
+    struct dirent *entry;
+
+    while ((entry = readdir(dir)) != NULL) {
+
+        // skip . and .. and .pes
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0 ||
+            strcmp(entry->d_name, ".pes") == 0) {
+            continue;
+        }
+
+        TreeEntry *te = &tree.entries[tree.count];
+
+        // get mode
+        te->mode = get_file_mode(entry->d_name);
+
+        // set name
+        strncpy(te->name, entry->d_name, sizeof(te->name) - 1);
+        te->name[sizeof(te->name) - 1] = '\0';
+
+        // read file content
+        FILE *f = fopen(entry->d_name, "rb");
+        if (!f) continue;
+
+        fseek(f, 0, SEEK_END);
+        long size = ftell(f);
+        rewind(f);
+
+        void *buffer = malloc(size);
+        fread(buffer, 1, size, f);
+        fclose(f);
+
+        // write blob
+        object_write(OBJ_BLOB, buffer, size, &te->hash);
+
+        free(buffer);
+
+        tree.count++;
+    }
+
+    closedir(dir);
+
+    // serialize tree
+    void *data;
+    size_t len;
+
+    if (tree_serialize(&tree, &data, &len) != 0) {
+        return -1;
+    }
+
+    // write tree object
+    if (object_write(OBJ_TREE, data, len, id_out) != 0) {
+        free(data);
+        return -1;
+    }
+
+    free(data);
+    return 0;
 }
