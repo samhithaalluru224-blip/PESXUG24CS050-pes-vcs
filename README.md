@@ -292,7 +292,7 @@ my_project/
 │   ├── objects/          # Content-addressable blob/tree/commit storage
 │   │   ├── 2f/
 │   │   │   └── 8a3b...   # Sharded by first 2 hex chars of hash
-│   │   └── a1/
+=│   │   └── a1/
 │   │       └── 9c4e...
 │   ├── refs/
 │   │   └── heads/
